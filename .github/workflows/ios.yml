@@ -1,0 +1,70 @@
+# Build iOS pe macOS. Pornit automat de containerul Bunny (unealta run_pipeline → ios);
+# codul și fișele vin din Bunny Storage, așa că repo-ul conține doar acest workflow.
+name: iOS build
+run-name: iOS ${{ inputs.app }} ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      app: { description: 'Aplicația (ex. sportextra)', required: true, type: string }
+      job_id: { description: 'Jobul din containerul Bunny', required: true, type: string }
+      input_path: { description: 'Arhiva cu config + fișe în Bunny Storage', required: true, type: string }
+
+concurrency:
+  group: ios-${{ inputs.app }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26            # Xcode 26 — App Store cere build cu SDK-ul iOS 26
+    timeout-minutes: 75
+    env:
+      APP: ${{ inputs.app }}
+      BUNNY_STORAGE_HOST: ${{ vars.BUNNY_STORAGE_HOST || 'storage.bunnycdn.com' }}
+      BUNNY_STORAGE_ZONE: ${{ vars.BUNNY_STORAGE_ZONE }}
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      FASTLANE_SKIP_UPDATE_CHECK: '1'
+    steps:
+      - name: Cod + fișe din Bunny Storage
+        env:
+          BUNNY_STORAGE_KEY: ${{ secrets.BUNNY_STORAGE_KEY }}
+          INPUT_PATH: ${{ inputs.input_path }}
+        run: |
+          mkdir -p pub
+          curl -fsS -H "AccessKey: $BUNNY_STORAGE_KEY" "https://$BUNNY_STORAGE_HOST/$BUNNY_STORAGE_ZONE/publisher/app-store-publisher.tgz" | tar -xz -C pub
+          curl -fsS -H "AccessKey: $BUNNY_STORAGE_KEY" "https://$BUNNY_STORAGE_HOST/$BUNNY_STORAGE_ZONE/$INPUT_PATH" | tar -xz -C pub
+          test -f "pub/apps/$APP/app.config.yaml"
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '3.3', bundler-cache: true, working-directory: pub }
+
+      - name: Xcode 26
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Proiect iOS (Capacitor + patch-uri)
+        working-directory: pub
+        run: |
+          npm ci --no-audit --no-fund
+          node bin/publish.mjs native "$APP" ios
+
+      - name: Build, semnare automată, TestFlight
+        working-directory: pub
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: bundle exec fastlane ios build_upload app:"$APP"
+
+      - name: Log build (la eșec)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-logs-${{ inputs.job_id }}
+          path: ~/Library/Logs/gym
+          retention-days: 7
