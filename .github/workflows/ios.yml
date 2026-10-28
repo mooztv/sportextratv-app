@@ -59,7 +59,20 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-        run: bundle exec fastlane ios build_upload app:"$APP"
+        run: |
+          set -o pipefail
+          bundle exec fastlane ios build_upload app:"$APP" 2>&1 | tee "$RUNNER_TEMP/fastlane.log"
+
+      - name: Log în Bunny Storage (la eșec)
+        if: failure()
+        env:
+          BUNNY_STORAGE_KEY: ${{ secrets.BUNNY_STORAGE_KEY }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          L="$RUNNER_TEMP/ios-build.log"
+          { tail -n 400 "$RUNNER_TEMP/fastlane.log" 2>/dev/null; for f in ~/Library/Logs/gym/*.log; do [ -f "$f" ] && { echo "===== $f"; grep -nE "error:|warning: .*(sign|profile)|\*\* ARCHIVE FAILED|BUILD FAILED" "$f" | head -150; tail -n 80 "$f"; }; done; } > "$L" || true
+          curl -fsS -X PUT -H "AccessKey: $BUNNY_STORAGE_KEY" -H "Content-Type: text/plain" --data-binary @"$L" \
+            "https://$BUNNY_STORAGE_HOST/$BUNNY_STORAGE_ZONE/publisher/out/$APP/jobs/$JOB_ID/ios-build.log"
 
       - name: Log build (la eșec)
         if: failure()
